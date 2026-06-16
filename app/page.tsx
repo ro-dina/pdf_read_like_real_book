@@ -10,11 +10,17 @@ type FlipBookProps = Omit<React.ComponentProps<typeof HTMLFlipBook>, "children">
 type FlipPdfViewerProps = {
   fileUrl: string;
   fileName: string;
+  spreadSplitMode: SpreadSplitMode;
+  spreadPageOrder: SpreadPageOrder;
 };
 
 const LARGE_PDF_PAGE_THRESHOLD = 30;
 const VERY_LARGE_PDF_PAGE_THRESHOLD = 80;
 const RENDER_YIELD_MS = 0;
+const SPREAD_PAGE_ASPECT_RATIO = 1.35;
+
+type SpreadSplitMode = "auto" | "all" | "none";
+type SpreadPageOrder = "left-to-right" | "right-to-left";
 
 function isPdfFile(file: File): boolean {
   const hasPdfMimeType = file.type === "application/pdf";
@@ -22,11 +28,54 @@ function isPdfFile(file: File): boolean {
   return hasPdfMimeType || hasPdfExtension;
 }
 
-function FlipPdfViewer({ fileUrl, fileName }: FlipPdfViewerProps) {
+function canvasToPageImages(
+  canvas: HTMLCanvasElement,
+  spreadSplitMode: SpreadSplitMode,
+  spreadPageOrder: SpreadPageOrder
+): string[] {
+  const shouldSplit =
+    spreadSplitMode === "all" ||
+    (spreadSplitMode === "auto" && canvas.width / canvas.height >= SPREAD_PAGE_ASPECT_RATIO);
+
+  if (!shouldSplit) {
+    return [canvas.toDataURL("image/jpeg", 0.85)];
+  }
+
+  const halfWidth = Math.floor(canvas.width / 2);
+  const rightWidth = canvas.width - halfWidth;
+  const sourceRects =
+    spreadPageOrder === "left-to-right"
+      ? [
+          { x: 0, width: halfWidth },
+          { x: halfWidth, width: rightWidth },
+        ]
+      : [
+          { x: halfWidth, width: rightWidth },
+          { x: 0, width: halfWidth },
+        ];
+
+  return sourceRects.map(({ x, width }) => {
+    const pageCanvas = document.createElement("canvas");
+    const pageContext = pageCanvas.getContext("2d");
+
+    if (!pageContext) {
+      throw new Error("Canvas context could not be created.");
+    }
+
+    pageCanvas.width = width;
+    pageCanvas.height = canvas.height;
+    pageContext.drawImage(canvas, x, 0, width, canvas.height, 0, 0, width, canvas.height);
+
+    return pageCanvas.toDataURL("image/jpeg", 0.85);
+  });
+}
+
+function FlipPdfViewer({ fileUrl, fileName, spreadSplitMode, spreadPageOrder }: FlipPdfViewerProps) {
   const [pages, setPages] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [loadingStatus, setLoadingStatus] = useState<string>("");
+  const [splitPageCount, setSplitPageCount] = useState(0);
 
   useEffect(() => {
     if (!fileUrl) {
@@ -34,6 +83,7 @@ function FlipPdfViewer({ fileUrl, fileName }: FlipPdfViewerProps) {
       setErrorMessage(null);
       setIsLoading(false);
       setLoadingStatus("");
+      setSplitPageCount(0);
       return;
     }
 
@@ -44,6 +94,7 @@ function FlipPdfViewer({ fileUrl, fileName }: FlipPdfViewerProps) {
         setIsLoading(true);
         setErrorMessage(null);
         setPages([]);
+        setSplitPageCount(0);
         setLoadingStatus("PDFを解析しています…");
 
         const pdfjs: PdfJsModule = await import("pdfjs-dist");
@@ -88,10 +139,14 @@ function FlipPdfViewer({ fileUrl, fileName }: FlipPdfViewerProps) {
             viewport,
           }).promise;
 
-          rendered.push(canvas.toDataURL("image/jpeg", 0.85));
+          const pageImages = canvasToPageImages(canvas, spreadSplitMode, spreadPageOrder);
+          rendered.push(...pageImages);
 
           if (!isCancelled) {
             setPages([...rendered]);
+            if (pageImages.length > 1) {
+              setSplitPageCount((count) => count + 1);
+            }
           }
 
           await new Promise<void>((resolve) => {
@@ -120,7 +175,7 @@ function FlipPdfViewer({ fileUrl, fileName }: FlipPdfViewerProps) {
     return () => {
       isCancelled = true;
     };
-  }, [fileUrl]);
+  }, [fileUrl, spreadSplitMode, spreadPageOrder]);
 
   const flipBookProps: FlipBookProps = useMemo(
     () => ({
@@ -184,6 +239,11 @@ function FlipPdfViewer({ fileUrl, fileName }: FlipPdfViewerProps) {
           {loadingStatus}
         </div>
       ) : null}
+      {splitPageCount > 0 ? (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 shadow-sm">
+          横長の見開きページを {splitPageCount} 枚分、左右ページに分割しました。
+        </div>
+      ) : null}
 
       <div className="rounded-2xl bg-neutral-200 p-4 shadow-inner">
         <HTMLFlipBook {...flipBookProps}>
@@ -209,6 +269,8 @@ export default function Page() {
   const [selectedFileName, setSelectedFileName] = useState<string>("");
   const [selectedFileUrl, setSelectedFileUrl] = useState<string>("");
   const [fileValidationMessage, setFileValidationMessage] = useState<string | null>(null);
+  const [spreadSplitMode, setSpreadSplitMode] = useState<SpreadSplitMode>("auto");
+  const [spreadPageOrder, setSpreadPageOrder] = useState<SpreadPageOrder>("right-to-left");
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const input = event.target;
@@ -282,10 +344,93 @@ export default function Page() {
           ) : null}
           <p className="text-xs text-neutral-400">対応形式: PDF</p>
         </div>
+
+        <div className="mt-6 grid gap-4 border-t border-neutral-200 pt-5 sm:grid-cols-2">
+          <fieldset className="rounded-lg border border-neutral-200 bg-neutral-50 p-4 text-sm text-neutral-700">
+            <legend className="font-medium text-neutral-900">見開きページの分割</legend>
+            <div className="mt-3 flex flex-col gap-2">
+              <label className="flex items-start gap-2">
+                <input
+                  type="radio"
+                  name="spread-split-mode"
+                  value="auto"
+                  checked={spreadSplitMode === "auto"}
+                  onChange={() => setSpreadSplitMode("auto")}
+                  className="mt-0.5 h-4 w-4 accent-neutral-900"
+                />
+                <span>
+                  <span className="block">自動判定</span>
+                  <span className="block text-xs text-neutral-500">明らかに横長のページだけ分割します。</span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2">
+                <input
+                  type="radio"
+                  name="spread-split-mode"
+                  value="all"
+                  checked={spreadSplitMode === "all"}
+                  onChange={() => setSpreadSplitMode("all")}
+                  className="mt-0.5 h-4 w-4 accent-neutral-900"
+                />
+                <span>
+                  <span className="block">すべて分割</span>
+                  <span className="block text-xs text-neutral-500">正方形に近い見開きPDFはこちらを使います。</span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2">
+                <input
+                  type="radio"
+                  name="spread-split-mode"
+                  value="none"
+                  checked={spreadSplitMode === "none"}
+                  onChange={() => setSpreadSplitMode("none")}
+                  className="mt-0.5 h-4 w-4 accent-neutral-900"
+                />
+                <span>分割しない</span>
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset
+            className="rounded-lg border border-neutral-200 bg-neutral-50 p-4 text-sm text-neutral-700"
+            disabled={spreadSplitMode === "none"}
+          >
+            <legend className="font-medium text-neutral-900">分割後のページ順</legend>
+            <div className="mt-3 flex flex-col gap-2">
+              <label className="flex items-center gap-2">
+                <input
+                  type="radio"
+                  name="spread-page-order"
+                  value="right-to-left"
+                  checked={spreadPageOrder === "right-to-left"}
+                  onChange={() => setSpreadPageOrder("right-to-left")}
+                  className="h-4 w-4 accent-neutral-900"
+                />
+                右ページから左ページへ
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="radio"
+                  name="spread-page-order"
+                  value="left-to-right"
+                  checked={spreadPageOrder === "left-to-right"}
+                  onChange={() => setSpreadPageOrder("left-to-right")}
+                  className="h-4 w-4 accent-neutral-900"
+                />
+                左ページから右ページへ
+              </label>
+            </div>
+          </fieldset>
+        </div>
       </section>
 
       <section>
-        <FlipPdfViewer fileUrl={selectedFileUrl} fileName={selectedFileName || "PDF"} />
+        <FlipPdfViewer
+          fileUrl={selectedFileUrl}
+          fileName={selectedFileName || "PDF"}
+          spreadSplitMode={spreadSplitMode}
+          spreadPageOrder={spreadPageOrder}
+        />
       </section>
     </main>
   );
