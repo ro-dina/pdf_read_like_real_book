@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { type ChangeEvent, useEffect, useMemo, useState } from "react";
+import { type ChangeEvent, type TouchEvent, useEffect, useMemo, useState } from "react";
 import HTMLFlipBook from "react-pageflip";
 
 type PdfJsModule = typeof import("pdfjs-dist");
@@ -21,7 +21,7 @@ const RENDER_YIELD_MS = 0;
 const SPREAD_PAGE_ASPECT_RATIO = 1.35;
 const BOOK_PAGE_ASPECT_RATIO = 0.7;
 
-type BookViewMode = "single" | "spread";
+type BookViewMode = "single" | "spread" | "swipe";
 type SpreadSplitMode = "auto" | "all" | "none";
 type SpreadPageOrder = "left-to-right" | "right-to-left";
 type ViewportSize = {
@@ -96,7 +96,7 @@ function useViewportSize(): ViewportSize {
   return viewportSize;
 }
 
-function getBookSize(viewMode: BookViewMode, isFullscreen: boolean, viewportSize: ViewportSize) {
+function getBookSize(viewMode: Exclude<BookViewMode, "swipe">, isFullscreen: boolean, viewportSize: ViewportSize) {
   const horizontalPadding = isFullscreen ? 48 : 32;
   const verticalPadding = isFullscreen ? 120 : 32;
   const pagesAcross = viewMode === "spread" ? 2 : 1;
@@ -113,7 +113,109 @@ function getBookSize(viewMode: BookViewMode, isFullscreen: boolean, viewportSize
   };
 }
 
-function BookRenderer({
+function SwipePageReader({
+  pages,
+  fileName,
+  isFullscreen = false,
+}: {
+  pages: string[];
+  fileName: string;
+  isFullscreen?: boolean;
+}) {
+  const viewportSize = useViewportSize();
+  const [currentPageIndex, setCurrentPageIndex] = useState(0);
+  const [touchStartX, setTouchStartX] = useState<number | null>(null);
+  const { width, height } = useMemo(
+    () => getBookSize("single", isFullscreen, viewportSize),
+    [isFullscreen, viewportSize]
+  );
+  const safeCurrentPageIndex = Math.min(currentPageIndex, Math.max(0, pages.length - 1));
+
+  const goToPreviousPage = () => {
+    setCurrentPageIndex((index) => Math.max(0, index - 1));
+  };
+
+  const goToNextPage = () => {
+    setCurrentPageIndex((index) => Math.min(pages.length - 1, index + 1));
+  };
+
+  const handleTouchStart = (event: TouchEvent<HTMLDivElement>) => {
+    setTouchStartX(event.changedTouches[0]?.clientX ?? null);
+  };
+
+  const handleTouchEnd = (event: TouchEvent<HTMLDivElement>) => {
+    if (touchStartX === null) {
+      return;
+    }
+
+    const touchEndX = event.changedTouches[0]?.clientX ?? touchStartX;
+    const swipeDistance = touchStartX - touchEndX;
+
+    if (Math.abs(swipeDistance) > 48) {
+      if (swipeDistance > 0) {
+        goToNextPage();
+      } else {
+        goToPreviousPage();
+      }
+    }
+
+    setTouchStartX(null);
+  };
+
+  return (
+    <div className="mx-auto flex flex-col items-center gap-3" style={{ width }}>
+      <div className="flex w-full items-center justify-between gap-2 text-sm text-neutral-600">
+        <button
+          type="button"
+          onClick={goToPreviousPage}
+          disabled={safeCurrentPageIndex === 0}
+          className="rounded-md border border-neutral-300 bg-white px-3 py-2 font-medium text-neutral-800 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          前へ
+        </button>
+        <span>
+          {safeCurrentPageIndex + 1} / {pages.length}
+        </span>
+        <button
+          type="button"
+          onClick={goToNextPage}
+          disabled={safeCurrentPageIndex === pages.length - 1}
+          className="rounded-md border border-neutral-300 bg-white px-3 py-2 font-medium text-neutral-800 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          次へ
+        </button>
+      </div>
+
+      <div
+        className="w-full touch-pan-y overflow-hidden rounded-lg bg-neutral-100 shadow-sm"
+        style={{ height }}
+        onTouchStart={handleTouchStart}
+        onTouchEnd={handleTouchEnd}
+      >
+        <div
+          className="flex h-full transition-transform duration-300 ease-out"
+          style={{ transform: `translateX(-${safeCurrentPageIndex * 100}%)` }}
+        >
+          {pages.map((src, index) => (
+            <div key={`${fileName}-swipe-${index}`} className="relative h-full w-full shrink-0 bg-white">
+              <Image
+                src={src}
+                alt={`${fileName} ${index + 1}ページ目`}
+                fill
+                unoptimized
+                sizes="(max-width: 768px) 100vw, 680px"
+                className="object-contain"
+                priority={index === safeCurrentPageIndex}
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FlipBookRenderer({
   pages,
   fileName,
   viewMode,
@@ -121,7 +223,7 @@ function BookRenderer({
 }: {
   pages: string[];
   fileName: string;
-  viewMode: BookViewMode;
+  viewMode: Exclude<BookViewMode, "swipe">;
   isFullscreen?: boolean;
 }) {
   const viewportSize = useViewportSize();
@@ -177,6 +279,28 @@ function BookRenderer({
       </HTMLFlipBook>
     </div>
   );
+}
+
+function BookRenderer({
+  pages,
+  fileName,
+  viewMode,
+  isFullscreen = false,
+}: {
+  pages: string[];
+  fileName: string;
+  viewMode: BookViewMode;
+  isFullscreen?: boolean;
+}) {
+  if (viewMode === "swipe") {
+    return (
+      <div className="overflow-auto px-1 py-2">
+        <SwipePageReader pages={pages} fileName={fileName} isFullscreen={isFullscreen} />
+      </div>
+    );
+  }
+
+  return <FlipBookRenderer pages={pages} fileName={fileName} viewMode={viewMode} isFullscreen={isFullscreen} />;
 }
 
 function FlipPdfViewer({ fileUrl, fileName, spreadSplitMode, spreadPageOrder, bookViewMode }: FlipPdfViewerProps) {
@@ -347,7 +471,11 @@ function FlipPdfViewer({ fileUrl, fileName, spreadSplitMode, spreadPageOrder, bo
       ) : null}
 
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-neutral-200 bg-white px-4 py-3 text-sm text-neutral-600 shadow-sm">
-        <span>{bookViewMode === "spread" ? "見開き表示中" : "単ページ表示中"}</span>
+        <span>
+          {bookViewMode === "spread" ? "見開き表示中" : null}
+          {bookViewMode === "single" ? "単ページ表示中" : null}
+          {bookViewMode === "swipe" ? "スワイプ表示中" : null}
+        </span>
         <button
           type="button"
           onClick={() => setIsFullscreenOpen(true)}
@@ -491,6 +619,20 @@ export default function Page() {
                   className="mt-0.5 h-4 w-4 accent-neutral-900"
                 />
                 <span>単ページ</span>
+              </label>
+              <label className="flex items-start gap-2">
+                <input
+                  type="radio"
+                  name="book-view-mode"
+                  value="swipe"
+                  checked={bookViewMode === "swipe"}
+                  onChange={() => setBookViewMode("swipe")}
+                  className="mt-0.5 h-4 w-4 accent-neutral-900"
+                />
+                <span>
+                  <span className="block">スワイプ</span>
+                  <span className="block text-xs text-neutral-500">スマホで左右スワイプして1ページずつ送ります。</span>
+                </span>
               </label>
             </div>
           </fieldset>
