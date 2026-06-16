@@ -12,15 +12,22 @@ type FlipPdfViewerProps = {
   fileName: string;
   spreadSplitMode: SpreadSplitMode;
   spreadPageOrder: SpreadPageOrder;
+  bookViewMode: BookViewMode;
 };
 
 const LARGE_PDF_PAGE_THRESHOLD = 30;
 const VERY_LARGE_PDF_PAGE_THRESHOLD = 80;
 const RENDER_YIELD_MS = 0;
 const SPREAD_PAGE_ASPECT_RATIO = 1.35;
+const BOOK_PAGE_ASPECT_RATIO = 0.7;
 
+type BookViewMode = "single" | "spread";
 type SpreadSplitMode = "auto" | "all" | "none";
 type SpreadPageOrder = "left-to-right" | "right-to-left";
+type ViewportSize = {
+  width: number;
+  height: number;
+};
 
 function isPdfFile(file: File): boolean {
   const hasPdfMimeType = file.type === "application/pdf";
@@ -70,12 +77,115 @@ function canvasToPageImages(
   });
 }
 
-function FlipPdfViewer({ fileUrl, fileName, spreadSplitMode, spreadPageOrder }: FlipPdfViewerProps) {
+function useViewportSize(): ViewportSize {
+  const [viewportSize, setViewportSize] = useState<ViewportSize>({ width: 1280, height: 720 });
+
+  useEffect(() => {
+    const updateViewportSize = () => {
+      setViewportSize({ width: window.innerWidth, height: window.innerHeight });
+    };
+
+    updateViewportSize();
+    window.addEventListener("resize", updateViewportSize);
+
+    return () => {
+      window.removeEventListener("resize", updateViewportSize);
+    };
+  }, []);
+
+  return viewportSize;
+}
+
+function getBookSize(viewMode: BookViewMode, isFullscreen: boolean, viewportSize: ViewportSize) {
+  const horizontalPadding = isFullscreen ? 48 : 32;
+  const verticalPadding = isFullscreen ? 120 : 32;
+  const pagesAcross = viewMode === "spread" ? 2 : 1;
+  const maxBookWidth = Math.max(315, viewportSize.width - horizontalPadding);
+  const maxBookHeight = Math.max(420, viewportSize.height - verticalPadding);
+  const maxPageWidthByWidth = maxBookWidth / pagesAcross;
+  const maxPageWidthByHeight = maxBookHeight * BOOK_PAGE_ASPECT_RATIO;
+  const preferredPageWidth = isFullscreen ? 680 : 420;
+  const pageWidth = Math.floor(Math.max(315, Math.min(preferredPageWidth, maxPageWidthByWidth, maxPageWidthByHeight)));
+
+  return {
+    width: pageWidth,
+    height: Math.floor(pageWidth / BOOK_PAGE_ASPECT_RATIO),
+  };
+}
+
+function BookRenderer({
+  pages,
+  fileName,
+  viewMode,
+  isFullscreen = false,
+}: {
+  pages: string[];
+  fileName: string;
+  viewMode: BookViewMode;
+  isFullscreen?: boolean;
+}) {
+  const viewportSize = useViewportSize();
+  const { width, height } = useMemo(
+    () => getBookSize(viewMode, isFullscreen, viewportSize),
+    [isFullscreen, viewMode, viewportSize]
+  );
+
+  const flipBookProps: FlipBookProps = useMemo(
+    () => ({
+      width,
+      height,
+      showCover: false,
+      mobileScrollSupport: false,
+      className: "mx-auto",
+      style: {},
+      startPage: 0,
+      size: "fixed",
+      minWidth: width,
+      maxWidth: width,
+      minHeight: height,
+      maxHeight: height,
+      drawShadow: true,
+      flippingTime: 900,
+      usePortrait: viewMode === "single",
+      startZIndex: 0,
+      autoSize: false,
+      maxShadowOpacity: 0.65,
+      showPageCorners: true,
+      disableFlipByClick: false,
+      clickEventForward: true,
+      useMouseEvents: true,
+      swipeDistance: 30,
+    }),
+    [height, viewMode, width]
+  );
+
+  return (
+    <div className="overflow-auto px-1 py-2">
+      <HTMLFlipBook key={`${viewMode}-${isFullscreen ? "fullscreen" : "inline"}-${width}-${height}`} {...flipBookProps}>
+        {pages.map((src, index) => (
+          <div key={`${fileName}-${index}`} className="relative h-full w-full overflow-hidden bg-white">
+            <Image
+              src={src}
+              alt={`${fileName} ${index + 1}ページ目`}
+              fill
+              unoptimized
+              sizes={viewMode === "spread" ? "(max-width: 768px) 50vw, 680px" : "(max-width: 768px) 100vw, 680px"}
+              className="object-contain"
+            />
+          </div>
+        ))}
+      </HTMLFlipBook>
+    </div>
+  );
+}
+
+function FlipPdfViewer({ fileUrl, fileName, spreadSplitMode, spreadPageOrder, bookViewMode }: FlipPdfViewerProps) {
   const [pages, setPages] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [loadingStatus, setLoadingStatus] = useState<string>("");
   const [splitPageCount, setSplitPageCount] = useState(0);
+  const [isFullscreenOpen, setIsFullscreenOpen] = useState(false);
 
   useEffect(() => {
     if (!fileUrl) {
@@ -177,34 +287,25 @@ function FlipPdfViewer({ fileUrl, fileName, spreadSplitMode, spreadPageOrder }: 
     };
   }, [fileUrl, spreadSplitMode, spreadPageOrder]);
 
-  const flipBookProps: FlipBookProps = useMemo(
-    () => ({
-      width: 420,
-      height: 600,
-      showCover: true,
-      mobileScrollSupport: false,
-      className: "mx-auto",
-      style: {},
-      startPage: 0,
-      size: "fixed",
-      minWidth: 315,
-      maxWidth: 1000,
-      minHeight: 450,
-      maxHeight: 1536,
-      drawShadow: true,
-      flippingTime: 700,
-      usePortrait: true,
-      startZIndex: 0,
-      autoSize: false,
-      maxShadowOpacity: 0.5,
-      showPageCorners: true,
-      disableFlipByClick: false,
-      clickEventForward: true,
-      useMouseEvents: true,
-      swipeDistance: 30,
-    }),
-    []
-  );
+  useEffect(() => {
+    if (!isFullscreenOpen) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsFullscreenOpen(false);
+      }
+    };
+
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = "";
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isFullscreenOpen]);
 
   if (isLoading && pages.length === 0) {
     return (
@@ -245,22 +346,38 @@ function FlipPdfViewer({ fileUrl, fileName, spreadSplitMode, spreadPageOrder }: 
         </div>
       ) : null}
 
-      <div className="rounded-2xl bg-neutral-200 p-4 shadow-inner">
-        <HTMLFlipBook {...flipBookProps}>
-          {pages.map((src, index) => (
-            <div key={`${fileName}-${index}`} className="relative h-full w-full overflow-hidden bg-white">
-              <Image
-                src={src}
-                alt={`${fileName} ${index + 1}ページ目`}
-                fill
-                unoptimized
-                sizes="(max-width: 768px) 100vw, 420px"
-                className="object-contain"
-              />
-            </div>
-          ))}
-        </HTMLFlipBook>
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-neutral-200 bg-white px-4 py-3 text-sm text-neutral-600 shadow-sm">
+        <span>{bookViewMode === "spread" ? "見開き表示中" : "単ページ表示中"}</span>
+        <button
+          type="button"
+          onClick={() => setIsFullscreenOpen(true)}
+          className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-700"
+        >
+          全画面で読む
+        </button>
       </div>
+
+      <div className="rounded-2xl bg-neutral-200 p-4 shadow-inner">
+        <BookRenderer pages={pages} fileName={fileName} viewMode={bookViewMode} />
+      </div>
+
+      {isFullscreenOpen ? (
+        <div className="fixed inset-0 z-50 flex flex-col bg-neutral-950/95 p-3 text-white sm:p-5">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <p className="min-w-0 truncate text-sm text-neutral-200">{fileName}</p>
+            <button
+              type="button"
+              onClick={() => setIsFullscreenOpen(false)}
+              className="rounded-md border border-white/30 px-4 py-2 text-sm font-medium text-white hover:bg-white/10"
+            >
+              閉じる
+            </button>
+          </div>
+          <div className="flex min-h-0 flex-1 items-center justify-center rounded-xl bg-neutral-900 p-2 shadow-2xl">
+            <BookRenderer pages={pages} fileName={fileName} viewMode={bookViewMode} isFullscreen />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -271,6 +388,7 @@ export default function Page() {
   const [fileValidationMessage, setFileValidationMessage] = useState<string | null>(null);
   const [spreadSplitMode, setSpreadSplitMode] = useState<SpreadSplitMode>("auto");
   const [spreadPageOrder, setSpreadPageOrder] = useState<SpreadPageOrder>("right-to-left");
+  const [bookViewMode, setBookViewMode] = useState<BookViewMode>("spread");
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const input = event.target;
@@ -345,7 +463,38 @@ export default function Page() {
           <p className="text-xs text-neutral-400">対応形式: PDF</p>
         </div>
 
-        <div className="mt-6 grid gap-4 border-t border-neutral-200 pt-5 sm:grid-cols-2">
+        <div className="mt-6 grid gap-4 border-t border-neutral-200 pt-5 lg:grid-cols-3">
+          <fieldset className="rounded-lg border border-neutral-200 bg-neutral-50 p-4 text-sm text-neutral-700">
+            <legend className="font-medium text-neutral-900">本の表示</legend>
+            <div className="mt-3 flex flex-col gap-2">
+              <label className="flex items-start gap-2">
+                <input
+                  type="radio"
+                  name="book-view-mode"
+                  value="spread"
+                  checked={bookViewMode === "spread"}
+                  onChange={() => setBookViewMode("spread")}
+                  className="mt-0.5 h-4 w-4 accent-neutral-900"
+                />
+                <span>
+                  <span className="block">見開き</span>
+                  <span className="block text-xs text-neutral-500">左にP1、右にP2のように2ページで表示します。</span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2">
+                <input
+                  type="radio"
+                  name="book-view-mode"
+                  value="single"
+                  checked={bookViewMode === "single"}
+                  onChange={() => setBookViewMode("single")}
+                  className="mt-0.5 h-4 w-4 accent-neutral-900"
+                />
+                <span>単ページ</span>
+              </label>
+            </div>
+          </fieldset>
+
           <fieldset className="rounded-lg border border-neutral-200 bg-neutral-50 p-4 text-sm text-neutral-700">
             <legend className="font-medium text-neutral-900">見開きページの分割</legend>
             <div className="mt-3 flex flex-col gap-2">
@@ -430,6 +579,7 @@ export default function Page() {
           fileName={selectedFileName || "PDF"}
           spreadSplitMode={spreadSplitMode}
           spreadPageOrder={spreadPageOrder}
+          bookViewMode={bookViewMode}
         />
       </section>
     </main>
